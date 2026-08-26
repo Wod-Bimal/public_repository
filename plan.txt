@@ -1,0 +1,213 @@
+================================================================
+PUBLIC REPO SECURITY MANAGEMENT SYSTEM - PROJECT PLAN
+================================================================
+
+--------------------------------------------------
+1. PROBLEM STATEMENT
+--------------------------------------------------
+A public repository is exposed to several distinct threats:
+
+  1. Secret leakage        - API keys/passwords/tokens committed by mistake
+  2. Malicious contributions - PRs with hidden malicious code, compromised
+                                dependencies (supply-chain attacks)
+  3. Unauthorized access    - weak branch protection, direct pushes to
+                                main, force-push over history
+  4. Vulnerable dependencies - libraries with known CVEs
+  5. CI/CD abuse            - risky workflow permissions
+                                (e.g. pull_request_target misuse) that leak
+                                secrets or run untrusted code
+  6. Spam / social abuse    - fake issues, phishing links, bot spam
+  7. Cloning/scraping abuse - inherent to public repos, cannot be fully
+                                prevented, only monitored
+
+Goal: build a dashboard that connects to a user's GitHub repos and
+continuously monitors + reports on all of the above, with automated
+enforcement where possible.
+
+--------------------------------------------------
+2. TECH STACK
+--------------------------------------------------
+Language:         Python
+Web framework:     FastAPI
+Templates:         Jinja2 (React optional later for richer UI)
+GitHub API:        PyGithub
+HTTP client:       httpx
+Database:          PostgreSQL + SQLAlchemy + Alembic (migrations)
+Background jobs:   Celery + Redis
+Auth:              GitHub OAuth App (Authlib)
+Secret scanning:   gitleaks (external Go binary, called via subprocess)
+Dependency data:   OSV.dev REST API (free, no key required)
+Workflow parsing:  PyYAML
+Config:            python-dotenv + pydantic-settings
+
+--------------------------------------------------
+3. SYSTEM ARCHITECTURE
+--------------------------------------------------
+
+    ┌─────────────────────────────────────────────┐
+    │              Dashboard (Web UI)              │
+    │        FastAPI + Jinja2 (React later)        │
+    └───────────────────┬───────────────────────────┘
+                         │
+    ┌───────────────────▼───────────────────────────┐
+    │              API / Backend Service              │
+    │  FastAPI - auth, repo mgmt, scan results, API   │
+    └───────┬───────────────────────┬─────────────────┘
+            │                       │
+    ┌───────▼────────┐     ┌───────▼─────────────┐
+    │  PostgreSQL     │     │  Scan Workers        │
+    │  (repos, users, │     │  (Celery + Redis)    │
+    │  findings, logs)│     │  run scanners async  │
+    └─────────────────┘     └───────┬──────────────┘
+                                     │
+                        ┌────────────▼────────────┐
+                        │   GitHub API (REST +     │
+                        │   GraphQL via PyGithub)  │
+                        └──────────────────────────┘
+
+--------------------------------------------------
+4. DATA MODEL (PostgreSQL / SQLAlchemy)
+--------------------------------------------------
+users
+  - id, github_id, username, oauth_token (encrypted), created_at
+
+repos
+  - id, user_id (FK), owner, name, github_repo_id,
+    last_scanned_at, health_score
+
+findings
+  - id, repo_id (FK), type [secret | dependency | branch | workflow],
+    severity [critical | high | medium | low], title, details_json,
+    status [open | resolved | ignored], detected_at
+
+scan_runs
+  - id, repo_id (FK), started_at, finished_at,
+    status [running | success | failed]
+
+policies (phase 4)
+  - id, user_id (FK), rule_name, rule_config_json, enabled
+
+--------------------------------------------------
+5. CORE MODULES
+--------------------------------------------------
+
+5.1 GitHub Connector
+    - OAuth login flow, token storage
+    - Fetch repo list, commits, branch protection, workflow files,
+      dependency manifests
+    - Wraps PyGithub + raw REST calls where PyGithub lacks coverage
+
+5.2 Secrets Scanner
+    - Clone/shallow-fetch repo (or use existing local checkout)
+    - Run gitleaks via subprocess against the repo
+    - Parse JSON output into Finding records
+
+5.3 Dependency Scanner (SCA)
+    - Parse manifests: requirements.txt, package.json, go.mod, etc.
+    - Query OSV.dev API for each dependency + version
+    - Record CVEs found as Finding records with severity
+
+5.4 Branch Protection Checker
+    - repo.get_branch("main").get_protection() via PyGithub
+    - Flag: no required reviews, force-push allowed, no status checks
+      required, admins can bypass rules
+
+5.5 Workflow Risk Checker
+    - Parse .github/workflows/*.yml with PyYAML
+    - Flag dangerous patterns:
+        - pull_request_target combined with checkout of PR head
+        - overly broad permissions: blocks
+        - use of secrets in untrusted contexts
+
+5.6 Scan Orchestrator
+    - Celery tasks that run the above scanners per repo
+    - Triggered by: schedule (periodic re-scan) or webhook (on push/PR)
+
+5.7 Policy Engine (later phase)
+    - User-defined rules (e.g. "no repo may allow force-push to main")
+    - Evaluates findings + repo settings against rules
+    - Raises violations as a special Finding type
+
+5.8 Dashboard UI
+    - Repo list with health score badge
+    - Findings table per repo, filterable by severity/type/status
+    - Historical trend (findings over time)
+    - Settings page for connecting repos / managing policies
+
+5.9 Notifications
+    - Email / Slack / webhook alerts on new critical findings
+
+--------------------------------------------------
+6. BUILD ROADMAP (MILESTONES)
+--------------------------------------------------
+
+MILESTONE 1 - Local CLI proof of concept
+    - Python script: input = repo path
+    - Runs gitleaks + OSV.dev dependency check
+    - Prints findings to console
+    Deliverable: working scanner, no DB, no web UI
+
+MILESTONE 2 - Wrap in an API
+    - FastAPI app with a POST /scan?repo=owner/name endpoint
+    - Same scanning logic, but results stored in Postgres
+    Deliverable: API-driven single-repo scanning with persistence
+
+MILESTONE 3 - GitHub OAuth + repo listing
+    - Users log in via GitHub OAuth
+    - App lists their repos, lets them "track" specific ones
+    Deliverable: multi-user auth, repo selection UI
+
+MILESTONE 4 - Async scanning with Celery
+    - Move scan logic into Celery tasks
+    - API responds instantly, scans run in background
+    Deliverable: non-blocking scans, scan_runs table populated
+
+MILESTONE 5 - Webhook integration
+    - GitHub webhook on push/PR triggers an immediate scan
+    - Add branch protection + workflow risk checkers
+    Deliverable: automatic real-time scanning
+
+MILESTONE 6 - Dashboard UI
+    - Table of tracked repos with health scores
+    - Findings drill-down view, severity badges
+    - Historical trend charts
+    Deliverable: usable web dashboard
+
+MILESTONE 7 - Policy engine + notifications
+    - User-defined policies, violation flagging
+    - Email/Slack alerts on critical findings
+    Deliverable: full v1 "management system"
+
+--------------------------------------------------
+7. PROJECT FOLDER STRUCTURE (proposed)
+--------------------------------------------------
+repo-security-dashboard/
+├── app/
+│   ├── main.py                 (FastAPI app entrypoint)
+│   ├── auth/                   (GitHub OAuth logic)
+│   ├── github_connector/       (PyGithub wrappers)
+│   ├── scanners/
+│   │   ├── secrets_scanner.py
+│   │   ├── dependency_scanner.py
+│   │   ├── branch_checker.py
+│   │   └── workflow_checker.py
+│   ├── models/                 (SQLAlchemy models)
+│   ├── routers/                (FastAPI route modules)
+│   ├── tasks/                  (Celery tasks)
+│   ├── templates/              (Jinja2 HTML templates)
+│   └── config.py
+├── alembic/                    (DB migrations)
+├── tests/
+├── requirements.txt
+├── .env.example
+├── docker-compose.yml          (Postgres + Redis for local dev)
+└── plan.txt                    (this file)
+
+--------------------------------------------------
+8. NEXT IMMEDIATE STEP
+--------------------------------------------------
+Build Milestone 1: a single Python script that scans one local repo
+for leaked secrets and vulnerable dependencies, printing results to
+the console. This validates the core scanning logic before any
+web/DB/infra work begins.
+================================================================
