@@ -1,0 +1,141 @@
+================================================================
+STAGE 1 PLAN - LOCAL CLI PROOF OF CONCEPT
+================================================================
+(based on Milestone 1 of plan.txt)
+
+--------------------------------------------------
+1. GOAL
+--------------------------------------------------
+Build a single Python script that scans one local repository and
+prints findings to the console. No database, no web UI, no Celery.
+
+The purpose of this stage is to:
+  - Validate that gitleaks works as expected in this environment
+  - Validate the OSV.dev API integration works end-to-end
+  - Establish the scanning logic that later stages will reuse
+  - Give us a concrete, runnable artifact early
+
+--------------------------------------------------
+2. SCOPE (IN / OUT)
+--------------------------------------------------
+IN SCOPE:
+  - Repo path input (CLI arg + optional interactive prompt)
+  - Secrets scanning via gitleaks (calls external binary)
+  - Dependency scanning via OSV.dev API (parses manifests)
+  - Console output of findings with severity
+  - Stop early if repo path is not a git repo / does not exist
+
+OUT OF SCOPE (later stages):
+  - Any database / persistence
+  - Any HTTP API or web UI
+  - GitHub OAuth / user accounts
+  - Branch protection checking (needs GitHub API + a token)
+  - Workflow file checking (needs GitHub API)
+  - Celery background tasks
+  - Policy engine
+  - Notifications
+
+--------------------------------------------------
+3. FILES CREATED IN THIS STAGE
+--------------------------------------------------
+repo-security-dashboard/
+└── scan_repo.py                 (single entry-point script)
+└── .env.example                 (env template, gitleaks path)
+
+NOTE: For Stage 1 we deliberately keep everything in one module.
+The scanner code will be refactored into app/scanners/ in Stage 2
+when we wrap it in the FastAPI app.
+
+--------------------------------------------------
+4. IMPLEMENTATION DETAILS
+--------------------------------------------------
+4.1 Input handling
+    - Argument:  python scan_repo.py /path/to/repo
+    - Validate:  path exists, is a directory, contains .git
+
+4.2 Secrets scanning (gitleaks)
+    - Requirement: gitleaks installed and on PATH
+      (or GITLEAKS_PATH env var pointing to the binary)
+    - Command:
+        gitleaks detect --source <repo> \
+          --report-format json --report-source stdout --no-banner
+    - Parse JSON stdout into findings; map each result to
+      {severity, title, file, line, rule, commit, author}
+    - Handle error cases:
+      - binary missing          -> print error, continue to deps
+      - timeout (5 min)         -> print warning, continue
+      - no leaks                -> print "no leaks found"
+      - non-repo / detect errors -> treat repo as no findings
+
+4.3 Dependency scanning (OSV.dev)
+    - Discover manifests in repo:
+        requirements*.txt
+        setup.py / pyproject.toml / Pipfile
+        package.json
+        go.mod
+        Gemfile
+    - Parse each manifest to get (package, version) pairs
+    - Query OSV.dev API:  POST https://api.osv.dev/v1/query
+        body: { "package": {"name": ..., "ecosystem": "PyPI"},
+                "version": ... }
+    - Map OSV response vulns to findings:
+        severity from CVSS score if present else "medium"
+    - Rate limiting: OSV is free/unauthenticated; add a small sleep
+      (0.5s) between requests to be polite
+
+4.4 Output format
+    - Summary header: repo path, scan time, counts by severity
+    - Grouped sections: SECRETS  /  DEPENDENCIES
+    - Per finding one block:
+        [CRITICAL]  title
+        detail lines (file, line, package@version, CVE id, url)
+    - Exit code 0 even if findings exist (this is a report tool,
+      not a CI gate, at this stage)
+
+--------------------------------------------------
+5. TESTING / VERIFICATION
+--------------------------------------------------
+5.1 Unit-style checks (manual, no framework yet)
+    - Run against a clean git repo  -> no secrets, maybe few deps
+    - Run against a repo with a fake API key committed
+        -> must be flagged by gitleaks
+    - Run against a repo with an outdated dependency
+        (e.g. an old version of a known-vulnerable package)
+        -> must be flagged by OSV API
+    - Run with a bad path            -> friendly error message
+
+5.2 Manual smoke test
+    - Point the script at this project's own repo
+    - Confirm output reads cleanly
+
+--------------------------------------------------
+6. POSSIBLE ISSUES / RISKS
+--------------------------------------------------
+- gitleaks may not be installed on the target machine
+    -> provide install instructions / GITLEAKS_PATH fallback
+- gitleaks on a large repo can take a while
+    -> acceptable for PoC; later stages use shallow clones
+- OSV.dev API outage or rate limiting
+    -> script must not crash, print warning and continue
+- package.json is parsed with a hacks on toml/
+    -> acceptable for PoC; proper parsers come later
+- Parsing errors on unusual manifests
+    -> wrap each manifest parse in try/except, skip on failure
+
+--------------------------------------------------
+7. ACCEPTANCE CRITERIA (definition of done)
+--------------------------------------------------
+[ ] scan_repo.py runs from CLI against a local repo
+[ ] gitleaks findings appear in output when a secret exists
+[ ] OSV.dev findings appear when a vulnerable dep exists
+[ ] Missing gitleaks binary is handled gracefully
+[ ] Bad repo path produces a clear error message
+[ ] No database or network service required to run
+
+--------------------------------------------------
+8. NEXT STAGE (preview)
+--------------------------------------------------
+Stage 2 wraps scan_repo.py logic into app/scanners/* modules,
+adds FastAPI (POST /scan?repo=owner/name), and persists results
+to PostgreSQL. This stage's code is the foundation for that.
+================================================================
