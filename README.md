@@ -4,28 +4,24 @@ An experimental project for monitoring the security posture of public GitHub
 repositories. The backend is planned with FastAPI; React will be the frontend
 when the web milestones begin.
 
-## Milestone 1: local repository scanner
+## Milestone 1: local secret scanner
 
-The current deliverable is a CLI that scans a local Git repository for leaked
-secrets with [gitleaks](https://github.com/gitleaks/gitleaks) and vulnerable
-dependencies with the [OSV.dev API](https://osv.dev/). It does not start a web
+The CLI scans a local Git repository for leaked secrets with
+[gitleaks](https://github.com/gitleaks/gitleaks). It does not start a web
 server or require a database.
 
-Install the Python dependencies and make gitleaks available on `PATH`, or set
-`GITLEAKS_PATH` in the environment (see `.env.example`). Then run:
+Make gitleaks available on `PATH`, or set the `GITLEAKS_PATH` environment
+variable to its executable. Then run:
 
 ```powershell
-python scan_repo.py C:\path\to\repository
-python scan_repo.py C:\path\to\repository --json
+python repo_scanner.py C:\path\to\repository
+python repo_scanner.py C:\path\to\repository --json
 ```
 
-To run the scanner tests:
+To run the scanner tests (Python 3.11+):
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The `app/` and `alembic/` directories mirror the planned backend structure.
-They are placeholders for later milestones; the scanner remains at the
-repository root during Milestone 1.
-
+Dependency scanning via OSV.dev will be added as the next Milestone 1 feature.
