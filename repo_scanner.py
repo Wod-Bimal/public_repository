@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass
@@ -105,23 +106,28 @@ def resolve_gitleaks(explicit_path: str | None) -> str | None:
 
 def scan_secrets(repo_path: Path, gitleaks_binary: str) -> list[Finding]:
     try:
-        result = subprocess.run(
-            [
-                gitleaks_binary,
-                "detect",
-                "--source",
-                str(repo_path),
-                "--report-format",
-                "json",
-                "--report-source",
-                "stdout",
-                "--no-banner",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=GITLEAKS_TIMEOUT_SECONDS,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="repo-scanner-") as temp_dir:
+            report_path = Path(temp_dir) / "gitleaks-report.json"
+            result = subprocess.run(
+                [
+                    gitleaks_binary,
+                    "detect",
+                    "--source",
+                    str(repo_path),
+                    "--report-format",
+                    "json",
+                    "--report-path",
+                    str(report_path),
+                    "--no-banner",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=GITLEAKS_TIMEOUT_SECONDS,
+                check=False,
+            )
+            report = (
+                report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+            )
     except subprocess.TimeoutExpired as exc:
         raise ScanError(
             f"gitleaks exceeded the {GITLEAKS_TIMEOUT_SECONDS}-second timeout"
@@ -130,7 +136,7 @@ def scan_secrets(repo_path: Path, gitleaks_binary: str) -> list[Finding]:
         raise ScanError(f"could not run gitleaks: {exc}") from exc
 
     try:
-        results = json.loads(result.stdout or "[]")
+        results = json.loads(report or "[]")
     except json.JSONDecodeError as exc:
         message = result.stderr.strip() or "gitleaks returned invalid JSON"
         raise ScanError(message) from exc
