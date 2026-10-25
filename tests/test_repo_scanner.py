@@ -31,7 +31,7 @@ class ValidateRepositoryTests(unittest.TestCase):
 class SecretScannerTests(unittest.TestCase):
     @patch("repo_scanner.subprocess.run")
     def test_parses_gitleaks_report_without_exposing_secret(self, run):
-        run.return_value.stdout = json.dumps(
+        report = json.dumps(
             [
                 {
                     "RuleID": "generic-api-key",
@@ -44,8 +44,13 @@ class SecretScannerTests(unittest.TestCase):
                 }
             ]
         )
-        run.return_value.stderr = ""
-        run.return_value.returncode = 1
+
+        def write_report(command, **_kwargs):
+            report_path = Path(command[command.index("--report-path") + 1])
+            report_path.write_text(report, encoding="utf-8")
+            return Mock(stderr="", returncode=1)
+
+        run.side_effect = write_report
 
         findings = repo_scanner.scan_secrets(Path("repo"), "gitleaks")
 
@@ -53,7 +58,12 @@ class SecretScannerTests(unittest.TestCase):
         self.assertEqual(findings[0].details["file"], "config.py")
         self.assertEqual(findings[0].details["line"], 12)
         self.assertNotIn("Secret", findings[0].details)
-        self.assertNotIn("must-not-appear", json.dumps(repo_scanner.report_data(Path("repo"), findings)))
+        serialized_report = json.dumps(repo_scanner.report_data(Path("repo"), findings))
+        self.assertNotIn("must-not-appear", serialized_report)
+        command = run.call_args.args[0]
+        report_path = command[command.index("--report-path") + 1]
+        self.assertTrue(report_path.endswith("gitleaks-report.json"))
+        self.assertNotIn("--report-source", command)
 
     @patch("repo_scanner.subprocess.run")
     def test_empty_report_has_no_findings(self, run):
